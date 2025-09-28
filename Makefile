@@ -2,15 +2,27 @@ APP_NAME=proxy
 BIN_DIR=bin
 GO_VERSION=1.25
 
-# Default build
+# Default build (CLI version)
 build:
-	@echo ">> Building $(APP_NAME)..."
+	@echo ">> Building $(APP_NAME) CLI..."
 	@mkdir -p $(BIN_DIR)
-	@go build -o $(BIN_DIR)/$(APP_NAME) main.go
+	@go build -o $(BIN_DIR)/$(APP_NAME) main.go app.go
 
+# Build GUI version for macOS
+build-gui:
+	@echo ">> Building $(APP_NAME) GUI..."
+	@mkdir -p $(BIN_DIR)
+	@go build -o $(BIN_DIR)/$(APP_NAME)-gui main.go app.go
+
+# Run CLI version
 run: build
-	@echo ">> Running $(APP_NAME)..."
+	@echo ">> Running $(APP_NAME) CLI..."
 	@./$(BIN_DIR)/$(APP_NAME) proxies.json :8080
+
+# Run GUI version
+run-gui: build-gui
+	@echo ">> Running $(APP_NAME) GUI..."
+	@./$(BIN_DIR)/$(APP_NAME)-gui --gui
 
 clean:
 	@echo ">> Cleaning..."

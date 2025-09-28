@@ -40,6 +40,29 @@ make run
 
 This will start the proxy at localhost:8080.
 
+## 🖥️ Native macOS App (GUI)
+
+### Build and run GUI version
+
+```bash
+make run-gui
+```
+
+The app will use `icon.png` for the system tray icon if present in the project directory.
+
+This creates a native macOS app with:
+- **System tray integration** - runs in background with menu bar icon
+- **One-click proxy toggle** - big round button to connect/disconnect
+- **Real-time status** - shows current proxy, performance score, and connection status
+- **Automatic system proxy configuration** - no need to manually change macOS proxy settings
+- **Smart bypass mode** - when disconnected, traffic routes directly (no proxy)
+
+### Features
+- 🟢 **Connected**: Green ring around button, shows active proxy and performance
+- 🔴 **Disconnected**: Red ring around button, direct internet connection
+- 🟡 **Connecting**: Yellow status while establishing connection
+- 📊 **Performance metrics**: Real-time latency and score display
+
 ## 🐳 Run with Docker
 
 ### Build the image
@@ -74,8 +97,10 @@ For apps without proxy support, use tools like `proxychains` or `redsocks` to re
 
 | Command             | Description                           |
 | ------------------- | ------------------------------------- |
-| `make build`        | Build binary into bin/proxy           |
-| `make run`          | Run locally with proxies.json         |
+| `make build`        | Build CLI binary into bin/proxy      |
+| `make build-gui`    | Build GUI binary into bin/proxy-gui  |
+| `make run`          | Run CLI version with proxies.json    |
+| `make run-gui`      | Run native macOS GUI app             |
 | `make clean`        | Remove build artifacts                |
 | `make docker-build` | Build Docker image                    |
 | `make docker-run`   | Run container with port 8080 + config |

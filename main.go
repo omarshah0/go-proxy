@@ -245,10 +245,28 @@ func probeOnce(up *Upstream, probeTarget string) (time.Duration, bool) {
 // -------------------- HANDLER --------------------
 
 type Server struct {
-	pool *Pool
+	pool   *Pool
+	bypass bool // when true, acts as direct connection without upstream proxies
+	mu     sync.RWMutex
+}
+
+func (s *Server) SetBypass(bypass bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bypass = bypass
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	bypassMode := s.bypass
+	s.mu.RUnlock()
+
+	// If bypass mode is enabled, act as direct connection
+	if bypassMode {
+		s.handleDirect(w, r)
+		return
+	}
+
 	// pick best upstream
 	up := s.pool.Best()
 	if up == nil {
@@ -291,6 +309,81 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+func (s *Server) handleDirect(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodConnect {
+		s.handleDirectConnect(w, r)
+		return
+	}
+
+	// For non-CONNECT requests in direct mode, make direct HTTP request
+	transport := &http.Transport{
+		ForceAttemptHTTP2:     false,
+		DisableKeepAlives:     false,
+		MaxIdleConnsPerHost:   10,
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
+
+	outReq := r.Clone(context.Background())
+	// ensure URL is absolute
+	if outReq.URL.Scheme == "" {
+		if r.TLS != nil {
+			outReq.URL.Scheme = "https"
+		} else {
+			outReq.URL.Scheme = "http"
+		}
+	}
+	outReq.RequestURI = ""
+	// remove hop-by-hop headers
+	removeHopByHop(outReq.Header)
+
+	resp, err := transport.RoundTrip(outReq)
+	if err != nil {
+		http.Error(w, "direct connection error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	copyHeader(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func (s *Server) handleDirectConnect(w http.ResponseWriter, r *http.Request) {
+	hij, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "proxy does not support hijacking", http.StatusInternalServerError)
+		return
+	}
+	clientConn, _, err := hij.Hijack()
+	if err != nil {
+		http.Error(w, "hijack failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Direct connection to target
+	target := r.Host
+	serverConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		clientConn.Close()
+		return
+	}
+
+	// send success to client
+	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+
+	// pipe both directions
+	go func() {
+		io.Copy(serverConn, clientConn)
+		serverConn.Close()
+		clientConn.Close()
+	}()
+	go func() {
+		io.Copy(clientConn, serverConn)
+		serverConn.Close()
+		clientConn.Close()
+	}()
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, up *Upstream) {
@@ -351,9 +444,10 @@ func copyHeader(dst, src http.Header) {
 
 // -------------------- MAIN --------------------
 
-func main() {
+func runCLI() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: ./proxy <proxies.json> [listen_addr]")
+		fmt.Println("       ./proxy --gui  (for native macOS app)")
 		fmt.Println("Example proxies.json content: [{\"raw\":\"http://user:pass@1.2.3.4:3128\"},{\"raw\":\"socks5://1.2.3.4:1080\"}]")
 		return
 	}
@@ -382,5 +476,48 @@ func main() {
 	log.Printf("listening local proxy on %s, upstream count=%d", listen, len(ups))
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server failed: %v", err)
+	}
+}
+
+func runGUI() {
+	// Load config
+	cfg := "proxies.json" // default config file
+	ups, err := loadConfig(cfg)
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+	pool := &Pool{upstreams: ups}
+
+	// Start probe loop
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go pool.probeLoop(ctx, 10*time.Second, "example.com:80")
+
+	// Create server that starts in bypass mode
+	server := &Server{pool: pool, bypass: true}
+
+	// Start HTTP proxy server in background
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: server,
+	}
+	go func() {
+		log.Printf("proxy server ready on :8080, upstream count=%d", len(ups))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("server failed: %v", err)
+		}
+	}()
+
+	// Create and run GUI app
+	app := NewProxyApp(pool, server)
+	app.Run()
+}
+
+func main() {
+	// Check if GUI mode is requested
+	if len(os.Args) >= 2 && os.Args[1] == "--gui" {
+		runGUI()
+	} else {
+		runCLI()
 	}
 }
