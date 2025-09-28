@@ -29,19 +29,19 @@ type ProxyApp struct {
 
 func NewProxyApp(pool *Pool, server *Server) *ProxyApp {
 	myApp := app.New()
-	
+
 	// Try to load icon from file, fallback to nil if not found
 	if iconResource := loadIconFromFile("icon.png"); iconResource != nil {
 		myApp.SetIcon(iconResource)
 	}
-	
+
 	pa := &ProxyApp{
 		app:     myApp,
 		pool:    pool,
 		server:  server,
 		enabled: false, // start disconnected
 	}
-	
+
 	pa.setupUI()
 	return pa
 }
@@ -103,7 +103,7 @@ func (pa *ProxyApp) setupUI() {
 			}),
 		)
 		desk.SetSystemTrayMenu(menu)
-		
+
 		// Set system tray icon if available
 		if iconResource := loadIconFromFile("icon.png"); iconResource != nil {
 			desk.SetSystemTrayIcon(iconResource)
@@ -128,6 +128,14 @@ func (pa *ProxyApp) toggleProxy() {
 		// Enable proxy
 		pa.toggleButton.SetText("Disconnect Proxy")
 		pa.statusLabel.SetText("🟡 Connecting...")
+		pa.proxyLabel.SetText("Proxy: Discovering...")
+		pa.scoreLabel.SetText("Score: Testing...")
+
+		// Start fresh proxy discovery
+		go func() {
+			log.Println("User enabled proxy - starting fresh discovery")
+			pa.pool.FreshProbe()
+		}()
 
 		// Configure macOS system proxy
 		go pa.enableSystemProxy()

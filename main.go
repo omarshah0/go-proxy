@@ -52,20 +52,20 @@ func (p *Pool) Best() *Upstream {
 		return nil
 	}
 
-	best := p.upstreams[0]
-	best.mu.RLock()
-	defer best.mu.RUnlock()
+	var best *Upstream
+	var bestScore float64 = -1
 
-	for _, u := range p.upstreams[1:] {
+	// Find best proxy without complex locking
+	for _, u := range p.upstreams {
 		u.mu.RLock()
-		if u.score > best.score {
-			// release old best before switching
-			best.mu.RUnlock()
-			best = u
-			// lock new best so it's always protected
-			best.mu.RLock()
-		}
+		score := u.score
+		lastOK := u.lastOK
 		u.mu.RUnlock()
+		
+		if lastOK && score > bestScore {
+			best = u
+			bestScore = score
+		}
 	}
 
 	return best
@@ -205,40 +205,112 @@ func (p *Pool) probeLoop(ctx context.Context, interval time.Duration, probeTarge
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ups := p.List()
-			var wg sync.WaitGroup
-			for _, u := range ups {
-				wg.Add(1)
-				go func(up *Upstream) {
-					defer wg.Done()
-					rtt, ok := probeOnce(up, probeTarget)
-					up.mu.Lock()
-					up.lastCheck = time.Now()
-					up.lastRTT = rtt
-					up.lastOK = ok
-					if ok {
-						// score: inverse of latency (lower latency = higher score)
-						up.score = 1000.0 / float64(rtt.Milliseconds()+1)
-					} else {
-						up.score = 0.0
-					}
-					up.mu.Unlock()
-				}(u)
-			}
-			wg.Wait()
+			p.probeAllProxies()
 		}
 	}
 }
 
-func probeOnce(up *Upstream, probeTarget string) (time.Duration, bool) {
+// ProbeAllProxies tests all proxies simultaneously and updates their scores
+func (p *Pool) probeAllProxies() {
+	ups := p.List()
+	var wg sync.WaitGroup
+
+	log.Printf("Probing %d proxies...", len(ups))
+
+	for _, u := range ups {
+		wg.Add(1)
+		go func(up *Upstream) {
+			defer wg.Done()
+			rtt, ok := probeProxyHTTP(up)
+			up.mu.Lock()
+			up.lastCheck = time.Now()
+			up.lastRTT = rtt
+			up.lastOK = ok
+			if ok {
+				// Better scoring: combination of speed and reliability
+				// Base score from latency, bonus for reliability
+				latencyScore := 1000.0 / float64(rtt.Milliseconds()+10) // +10 to avoid division issues
+				up.score = latencyScore
+				log.Printf("Proxy %s: OK (RTT: %v, Score: %.2f)", up.Addr, rtt, up.score)
+			} else {
+				up.score = 0.0
+				log.Printf("Proxy %s: FAILED", up.Addr)
+			}
+			up.mu.Unlock()
+		}(u)
+	}
+	wg.Wait()
+
+	// Log best proxy
+	if best := p.Best(); best != nil {
+		best.mu.RLock()
+		log.Printf("Best proxy: %s (Score: %.2f, RTT: %v)", best.Addr, best.score, best.lastRTT)
+		best.mu.RUnlock()
+	}
+}
+
+// FreshProbe forces an immediate probe of all proxies (used when reconnecting)
+func (p *Pool) FreshProbe() {
+	log.Println("Starting fresh proxy discovery...")
+	p.probeAllProxies()
+}
+
+// probeProxyHTTP tests proxy with actual HTTP request to multiple endpoints
+func probeProxyHTTP(up *Upstream) (time.Duration, bool) {
+	// Test endpoints - use fast, reliable services
+	testURLs := []string{
+		"http://httpbin.org/ip",
+		"http://icanhazip.com",
+		"http://checkip.amazonaws.com",
+	}
+
 	start := time.Now()
-	dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	conn, err := dialViaUpstream(dialCtx, up, probeTarget)
+
+	// Try each test URL, return on first success
+	for _, testURL := range testURLs {
+		if rtt, ok := testProxyWithURL(up, testURL); ok {
+			return rtt, true
+		}
+	}
+
+	return time.Since(start), false
+}
+
+func testProxyWithURL(up *Upstream, testURL string) (time.Duration, bool) {
+	start := time.Now()
+
+	// Create HTTP client with proxy
+	transport := &http.Transport{
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			return up.URL, nil
+		},
+		ResponseHeaderTimeout: 5 * time.Second,
+		DisableKeepAlives:     true,
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   5 * time.Second,
+	}
+
+	resp, err := client.Get(testURL)
 	if err != nil {
 		return 0, false
 	}
-	_ = conn.Close()
+	defer resp.Body.Close()
+
+	// Check for successful response
+	if resp.StatusCode != 200 {
+		return 0, false
+	}
+
+	// Read a bit of the response to ensure it's working
+	buffer := make([]byte, 64)
+	_, err = resp.Body.Read(buffer)
+	if err != nil && err != io.EOF {
+		return 0, false
+	}
+
 	return time.Since(start), true
 }
 
@@ -463,10 +535,10 @@ func runCLI() {
 	}
 	pool := &Pool{upstreams: ups}
 
-	// Start probe loop
+	// Start probe loop with faster interval for better responsiveness
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go pool.probeLoop(ctx, 10*time.Second, "example.com:80") // probe target can be customized
+	go pool.probeLoop(ctx, 30*time.Second, "") // Empty target since we use HTTP endpoints now
 
 	// start HTTP proxy server
 	srv := &http.Server{
@@ -488,10 +560,10 @@ func runGUI() {
 	}
 	pool := &Pool{upstreams: ups}
 
-	// Start probe loop
+	// Start probe loop with faster interval
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go pool.probeLoop(ctx, 10*time.Second, "example.com:80")
+	go pool.probeLoop(ctx, 30*time.Second, "")
 
 	// Create server that starts in bypass mode
 	server := &Server{pool: pool, bypass: true}
