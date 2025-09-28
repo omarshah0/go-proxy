@@ -61,7 +61,7 @@ func (p *Pool) Best() *Upstream {
 		score := u.score
 		lastOK := u.lastOK
 		u.mu.RUnlock()
-		
+
 		if lastOK && score > bestScore {
 			best = u
 			bestScore = score
@@ -244,8 +244,13 @@ func (p *Pool) probeAllProxies() {
 	// Log best proxy
 	if best := p.Best(); best != nil {
 		best.mu.RLock()
-		log.Printf("Best proxy: %s (Score: %.2f, RTT: %v)", best.Addr, best.score, best.lastRTT)
+		addr := best.Addr
+		score := best.score
+		rtt := best.lastRTT
 		best.mu.RUnlock()
+		log.Printf("Best proxy: %s (Score: %.2f, RTT: %v)", addr, score, rtt)
+	} else {
+		log.Println("No working proxies found")
 	}
 }
 
